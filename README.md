@@ -1,4 +1,4 @@
-# RAG Evaluator Mini-Project
+# RAG Evaluator lab
 
 Lightweight RAGAS integration for validating Retrieval-Augmented Generation pipelines. Built to complement `ai-qa-decision-engine` with statistical evaluation of LLM-based RAG systems.
 
@@ -137,5 +137,5 @@ pytest tests/ --cov=evaluator --cov-report=html
 
 ---
 
-**Author:** Viviana Pérez  
+**Author:** Viviana Perez  
 **Portfolio:** [ViviDickens](https://github.com/ViviDickens)
