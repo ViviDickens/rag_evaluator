@@ -1,4 +1,5 @@
-# RAG Evaluation Orchestrator
+# RAG Evaluator lab
+
 
 An orchestrator that coordinates **RAGAS**, **DeepEval**, and **LangSmith** for comprehensive Retrieval-Augmented Generation (RAG) quality assurance.
 
@@ -108,4 +109,5 @@ MIT
 
 ---
 
+**Author:** Viviana Perez  
 **Portfolio:** [ViviDickens](https://github.com/ViviDickens)
