@@ -1,15 +1,15 @@
-# RAG Evaluator lab
+# RAG Evaluator
 
+An orchestrator that coordinates **RAGAS**, **DeepEval**, and **LangSmith** for Retrieval-Augmented Generation (RAG) quality assurance.
 
-An orchestrator that coordinates **RAGAS**, **DeepEval**, and **LangSmith** for comprehensive Retrieval-Augmented Generation (RAG) quality assurance.
+RAGAS runs the core metrics (faithfulness, answer relevancy, context precision/recall) against an OpenAI evaluator model. DeepEval runs an independent cross-check for hallucination and bias on the same test case. LangSmith logs each evaluation as a run for observability — locally if no API key is set, or to your LangSmith project if one is.
 
 ## Features
 
-- **RAGAS Integration** - Faithfulness, Answer Relevancy, Context Precision/Recall
-- **DeepEval Cross-Validation** - Hallucination detection, bias checking
-- **LangSmith Observability** - Production tracing, debugging, monitoring
-- **Statistical Rigor** - Confidence intervals, distribution analysis
-- **FastAPI REST API** - Easy integration with RAG pipelines
+- **RAGAS Integration** — real `ragas.evaluate()` calls: Faithfulness, Answer Relevancy, Context Precision/Recall
+- **DeepEval Cross-Validation** — independent hallucination and bias check on the same input, logged alongside the RAGAS scores rather than merged into them
+- **LangSmith Observability** — evaluation runs logged via the LangSmith SDK; falls back to local-only logging if no API key is configured
+- **FastAPI REST API** — easy integration with RAG pipelines
 
 ## Installation
 
@@ -19,14 +19,15 @@ An orchestrator that coordinates **RAGAS**, **DeepEval**, and **LangSmith** for 
 git clone https://github.com/ViviDickens/rag_evaluator.git
 cd rag_evaluator
 python -m venv venv
-source venv/Scripts/activate  # On Windows
-pip install -e .
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 2. Install dependencies
+### 2. Set environment variables
 
 ```bash
-pip install -r requirements.txt
+export OPENAI_API_KEY="sk-..."        # required — RAGAS evaluator LLM + embeddings
+export LANGSMITH_API_KEY="ls-..."     # optional — omit to log locally only
 ```
 
 ## Quick Start
@@ -36,6 +37,8 @@ pip install -r requirements.txt
 ```bash
 pytest tests/ -v
 ```
+
+The end-to-end test (`test_evaluate_single`) calls the real OpenAI API and is skipped automatically if `OPENAI_API_KEY` isn't set, so it won't fail CI on a runner without the secret. The other tests don't hit any API.
 
 ### Start server
 
@@ -66,10 +69,10 @@ print(f"Status: {response.overall_quality.status}")
 
 ## API Endpoints
 
-- `GET /health` - Health check
-- `GET /detectors` - List available metrics
-- `POST /evaluate/rag` - Evaluate RAG output
-- `GET /docs` - Swagger UI documentation
+- `GET /health` — Health check
+- `GET /detectors` — List available metrics
+- `POST /evaluate/rag` — Evaluate RAG output
+- `GET /docs` — Swagger UI documentation
 
 ## Project Structure
 
@@ -77,31 +80,39 @@ print(f"Status: {response.overall_quality.status}")
 rag_evaluator/
 ├── rag_evaluator/           # Package
 │   ├── __init__.py
-│   ├── app.py              # FastAPI application
-│   ├── evaluator.py        # RAGAS + DeepEval logic
-│   ├── schemas.py          # Pydantic models
-│   └── observability.py    # LangSmith integration
-├── tests/                  # Test suite
+│   ├── app.py               # FastAPI application
+│   ├── evaluator.py         # RAGAS + DeepEval orchestration
+│   ├── schemas.py           # Pydantic models
+│   └── observability.py     # LangSmith integration
+├── tests/                   # Test suite
 │   ├── __init__.py
 │   └── test_integration.py
-├── pyproject.toml         # Package configuration
-├── requirements.txt       # Dependencies
+├── pyproject.toml           # Package configuration
+├── requirements.txt         # Dependencies
 └── README.md
 ```
 
 ## Metrics Explained
 
-| Metric | Measures | Threshold |
-|--------|----------|-----------|
-| **Faithfulness** | Answer adherence to context | >0.85 |
-| **Answer Relevancy** | Relevance to question | >0.80 |
-| **Context Precision** | Retrieved doc quality | >0.90 |
-| **Context Recall** | Coverage completeness | >0.75 |
+| Metric | Measures | Threshold | Source |
+|--------|----------|-----------|--------|
+| **Faithfulness** | Answer adherence to context | >0.85 | RAGAS |
+| **Answer Relevancy** | Relevance to question | >0.80 | RAGAS |
+| **Context Precision** | Retrieved doc quality | >0.90 | RAGAS |
+| **Context Recall** | Coverage completeness | >0.75 | RAGAS |
+| **Hallucination** | Cross-check against context | 0.5 | DeepEval |
+| **Bias** | Cross-check on generated answer | 0.5 | DeepEval |
+
+## Why OpenAI as the evaluator model
+
+RAGAS needs an LLM to judge faithfulness/relevancy and an embeddings model for context precision/recall. This project uses OpenAI (`gpt-4o-mini` + `text-embedding-3-small`) because it has first-class, stable support in both RAGAS and LangChain with no version conflicts. A Gemini-based version was tried first and hit repeated dependency clashes between `langchain-google-genai` and RAGAS's pinned LangChain versions — a known pain point with that combination. A free-tier Groq variant (companion repo: `ragas-lab`) is also available for local experimentation without API cost.
 
 ## Requirements
 
 - Python 3.10+
 - pip/venv
+- OpenAI API key (for RAGAS evaluator model)
+- LangSmith API key (optional, for remote tracing)
 
 ## License
 
@@ -109,5 +120,5 @@ MIT
 
 ---
 
-**Author:** Viviana Perez  
+**Author:** Viviana Pérez
 **Portfolio:** [ViviDickens](https://github.com/ViviDickens)

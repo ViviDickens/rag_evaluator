@@ -1,11 +1,28 @@
 """
 RAG Evaluation Orchestrator: Coordinates RAGAS + DeepEval + LangSmith.
+
+This version calls the real libraries. Evaluator model is OpenAI
+(gpt-4o-mini + text-embedding-3-small) — no dependency clashes with
+LangChain/RAGAS like the Gemini combo had, at the cost of paying per
+call. Swap ChatOpenAI for ChatGroq in _build_ragas_llm() if you want
+the free-tier version instead (see ragas-lab for that variant).
 """
 
+import os
 import uuid
 import logging
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
+
+from datasets import Dataset
+from ragas import evaluate as ragas_evaluate
+from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
+from deepeval.metrics import HallucinationMetric, BiasMetric
+from deepeval.test_case import LLMTestCase
 
 from .schemas import (
     RAGEvaluationRequest,
@@ -15,8 +32,17 @@ from .schemas import (
     OverallQuality,
     RAGEvaluationStatus,
 )
+from .observability import LangSmithObserver
 
 logger = logging.getLogger(__name__)
+
+
+def _build_ragas_llm() -> LangchainLLMWrapper:
+    return LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini"))
+
+
+def _build_ragas_embeddings() -> LangchainEmbeddingsWrapper:
+    return LangchainEmbeddingsWrapper(OpenAIEmbeddings(model="text-embedding-3-small"))
 
 
 class RAGEvaluator:
@@ -31,22 +57,47 @@ class RAGEvaluator:
             "context_precision": 0.90,
             "context_recall": 0.75,
         }
-        logger.info("RAGEvaluator initialized")
+        # Built lazily on first use (see llm/embeddings properties below) so
+        # constructing a RAGEvaluator doesn't require OPENAI_API_KEY unless
+        # you actually run an evaluation.
+        self._llm: Optional[LangchainLLMWrapper] = None
+        self._embeddings: Optional[LangchainEmbeddingsWrapper] = None
+        self._observer = LangSmithObserver(api_key=os.environ.get("LANGSMITH_API_KEY"))
+        logger.info("RAGEvaluator initialized (RAGAS + DeepEval + LangSmith)")
 
-    async def evaluate_single(
-        self, request: RAGEvaluationRequest
-    ) -> RAGEvaluationResponse:
+    @property
+    def llm(self) -> LangchainLLMWrapper:
+        if self._llm is None:
+            self._llm = _build_ragas_llm()
+        return self._llm
+
+    @property
+    def embeddings(self) -> LangchainEmbeddingsWrapper:
+        if self._embeddings is None:
+            self._embeddings = _build_ragas_embeddings()
+        return self._embeddings
+
+    async def evaluate_single(self, request: RAGEvaluationRequest) -> RAGEvaluationResponse:
         """Evaluate a single RAG output."""
         evaluation_id = f"eval-{uuid.uuid4().hex[:8]}"
 
-        # RAGAS metrics
         metrics = self._calculate_ragas_metrics(request)
+        self._cross_validate_with_deepeval(request, metrics)
 
-        # Overall quality
         overall_quality = self._assess_overall_quality(metrics)
-
-        # Recommendations
         recommendations = self._generate_recommendations(metrics, request)
+
+        self._observer.log_evaluation_result(
+            evaluation_id=evaluation_id,
+            metrics={
+                "faithfulness": metrics.faithfulness.score,
+                "answer_relevancy": metrics.answer_relevancy.score,
+                "context_precision": metrics.context_precision.score,
+                "context_recall": metrics.context_recall.score,
+            },
+            recommendations=recommendations,
+            status=overall_quality.status.value,
+        )
 
         return RAGEvaluationResponse(
             evaluation_id=evaluation_id,
@@ -57,129 +108,59 @@ class RAGEvaluator:
         )
 
     def _calculate_ragas_metrics(self, request: RAGEvaluationRequest) -> RAGMetrics:
-        """Calculate RAGAS metrics."""
+        """Run the actual RAGAS metrics suite via ragas.evaluate()."""
+        ground_truth = request.ground_truth_answer or ""
 
-        faithfulness = self._calculate_faithfulness(
-            request.generated_answer,
-            request.retrieved_context,
-            request.ground_truth_answer,
+        dataset = Dataset.from_dict(
+            {
+                "question": [request.question],
+                "answer": [request.generated_answer],
+                "contexts": [request.retrieved_context],
+                "ground_truth": [ground_truth],
+            }
         )
 
-        answer_relevancy = self._calculate_answer_relevancy(
-            request.question, request.generated_answer
+        result = ragas_evaluate(
+            dataset,
+            metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+            llm=self.llm,
+            embeddings=self.embeddings,
+            raise_exceptions=False,
         )
 
-        context_precision = self._calculate_context_precision(
-            request.question, request.retrieved_context
-        )
-
-        context_recall = self._calculate_context_recall(
-            request.retrieved_context, request.ground_truth_answer
-        )
+        scores = result.to_pandas().iloc[0]
 
         return RAGMetrics(
-            faithfulness=MetricScore(score=faithfulness, confidence=0.88),
-            answer_relevancy=MetricScore(score=answer_relevancy, confidence=0.85),
-            context_precision=MetricScore(score=context_precision, confidence=0.90),
-            context_recall=MetricScore(score=context_recall, confidence=0.78),
+            faithfulness=MetricScore(score=float(scores["faithfulness"]), confidence=0.9),
+            answer_relevancy=MetricScore(score=float(scores["answer_relevancy"]), confidence=0.9),
+            context_precision=MetricScore(score=float(scores["context_precision"]), confidence=0.9),
+            context_recall=MetricScore(score=float(scores["context_recall"]), confidence=0.9),
         )
 
-    def _calculate_faithfulness(
-        self, answer: str, context: List[str], ground_truth: Optional[str]
-    ) -> float:
-        """Faithfulness: Does answer stick to context?"""
-        answer_tokens = set(answer.lower().split())
-        context_tokens = set()
-        for doc in context:
-            context_tokens.update(doc.lower().split())
-
-        stopwords = {
-            "the",
-            "a",
-            "an",
-            "is",
-            "are",
-            "was",
-            "were",
-            "and",
-            "or",
-            "but",
-        }
-        answer_tokens -= stopwords
-        context_tokens -= stopwords
-
-        if not answer_tokens:
-            return 0.5
-
-        overlap = len(answer_tokens & context_tokens) / len(answer_tokens)
-        return min(overlap, 1.0)
-
-    def _calculate_answer_relevancy(self, question: str, answer: str) -> float:
-        """Answer Relevancy: Is answer relevant to question?"""
-        question_tokens = set(question.lower().split())
-        answer_tokens = set(answer.lower().split())
-
-        stopwords = {
-            "the",
-            "a",
-            "an",
-            "is",
-            "are",
-            "was",
-            "were",
-            "what",
-            "how",
-            "why",
-        }
-        question_tokens -= stopwords
-
-        if not question_tokens:
-            return 0.5
-
-        relevancy = len(question_tokens & answer_tokens) / len(question_tokens)
-        return min(relevancy, 1.0)
-
-    def _calculate_context_precision(
-        self, question: str, context: List[str]
-    ) -> float:
-        """Context Precision: Are retrieved docs relevant?"""
-        if not context:
-            return 0.0
-
-        question_tokens = set(question.lower().split())
-        stopwords = {"the", "a", "an", "is", "are", "was", "were"}
-        question_tokens -= stopwords
-
-        relevant_count = 0
-        for doc in context:
-            doc_tokens = set(doc.lower().split()) - stopwords
-            if question_tokens & doc_tokens:
-                relevant_count += 1
-
-        return relevant_count / len(context)
-
-    def _calculate_context_recall(
-        self, context: List[str], ground_truth: Optional[str]
-    ) -> float:
-        """Context Recall: Is all needed context retrieved?"""
-        if not ground_truth or not context:
-            return 0.7
-
-        ground_truth_tokens = set(ground_truth.lower().split())
-        context_tokens = set()
-        for doc in context:
-            context_tokens.update(doc.lower().split())
-
-        stopwords = {"the", "a", "an", "is", "are", "was", "were"}
-        ground_truth_tokens -= stopwords
-
-        if not ground_truth_tokens:
-            return 0.7
-
-        recall = len(ground_truth_tokens & context_tokens) / len(
-            ground_truth_tokens
+    def _cross_validate_with_deepeval(self, request: RAGEvaluationRequest, metrics: RAGMetrics) -> None:
+        """
+        Run DeepEval as an independent second opinion on hallucination and
+        bias. This doesn't overwrite the RAGAS scores — it's a cross-check,
+        logged so a mismatch between the two is visible instead of hidden.
+        """
+        test_case = LLMTestCase(
+            input=request.question,
+            actual_output=request.generated_answer,
+            context=request.retrieved_context,
         )
-        return min(recall, 1.0)
+
+        hallucination = HallucinationMetric(threshold=0.5)
+        hallucination.measure(test_case)
+
+        bias = BiasMetric(threshold=0.5)
+        bias.measure(test_case)
+
+        logger.info(
+            "DeepEval cross-check — hallucination score: %.2f (reason: %s) | bias score: %.2f",
+            hallucination.score,
+            hallucination.reason,
+            bias.score,
+        )
 
     def _assess_overall_quality(self, metrics: RAGMetrics) -> OverallQuality:
         """Aggregate metrics into overall quality."""
@@ -207,26 +188,18 @@ class RAGEvaluator:
             passed=(overall_score >= threshold),
         )
 
-    def _generate_recommendations(
-        self, metrics: RAGMetrics, request: RAGEvaluationRequest
-    ) -> List[str]:
+    def _generate_recommendations(self, metrics: RAGMetrics, request: RAGEvaluationRequest) -> List[str]:
         """Generate actionable recommendations."""
         recommendations = []
 
         if metrics.faithfulness.score < self.thresholds["faithfulness"]:
-            recommendations.append(
-                "Faithfulness below threshold - ensure answer adheres to context"
-            )
+            recommendations.append("Faithfulness below threshold - ensure answer adheres to context")
 
         if metrics.answer_relevancy.score < self.thresholds["answer_relevancy"]:
-            recommendations.append(
-                "Answer relevancy low - review question understanding"
-            )
+            recommendations.append("Answer relevancy low - review question understanding")
 
         if metrics.context_precision.score < self.thresholds["context_precision"]:
-            recommendations.append(
-                "Context precision low - improve retrieval ranking"
-            )
+            recommendations.append("Context precision low - improve retrieval ranking")
 
         if metrics.context_recall.score < self.thresholds["context_recall"]:
             recommendations.append("Context recall low - expand retrieval window")

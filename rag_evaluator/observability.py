@@ -1,8 +1,13 @@
 """
 LangSmith integration for RAG evaluation observability.
+
+Uses the real langsmith Client to create runs. If no LANGSMITH_API_KEY
+is set, falls back to local-only logging instead of silently pretending
+to have sent data — that's the difference from the previous version.
 """
 
 import logging
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -10,33 +15,22 @@ logger = logging.getLogger(__name__)
 
 class LangSmithObserver:
     """
-    LangSmith integration for RAG evaluation observability.
-    Tracks metrics, traces, and provides production debugging capabilities.
+    Thin wrapper around the LangSmith SDK for evaluation observability.
     """
 
-    def __init__(
-        self, project_name: str = "rag_evaluator", api_key: Optional[str] = None
-    ):
+    def __init__(self, project_name: str = "rag_evaluator", api_key: Optional[str] = None):
         self.project_name = project_name
         self.api_key = api_key
         self.enabled = api_key is not None
+        self._client = None
 
         if self.enabled:
+            from langsmith import Client
+
+            self._client = Client(api_key=api_key)
             logger.info(f"LangSmith observer enabled for project: {project_name}")
         else:
-            logger.warning("LangSmith API key not provided. Tracing disabled.")
-
-    def log_metric(
-        self,
-        metric_name: str,
-        value: float,
-        metadata: Optional[Dict[str, Any]] = None,
-    ):
-        """Log a metric to LangSmith."""
-        if not self.enabled:
-            return
-
-        logger.debug(f"Metric logged: {metric_name}={value}")
+            logger.warning("LangSmith API key not provided. Tracing disabled — logging locally only.")
 
     def log_evaluation_result(
         self,
@@ -45,24 +39,20 @@ class LangSmithObserver:
         recommendations: list,
         status: str,
     ):
-        """Log evaluation result with metrics."""
+        """Log an evaluation result as a LangSmith run."""
         if not self.enabled:
+            logger.info(f"[local-only] Evaluation result: {evaluation_id} - {status} - {metrics}")
             return
 
-        logger.info(f"Evaluation result logged: {evaluation_id} - {status}")
-
-    def log_chain(
-        self,
-        chain_name: str,
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None,
-    ):
-        """Log chain execution."""
-        if not self.enabled:
-            return
-
-        logger.debug(f"Chain logged: {chain_name}")
+        self._client.create_run(
+            name="rag_evaluation",
+            run_type="chain",
+            project_name=self.project_name,
+            inputs={"evaluation_id": evaluation_id},
+            outputs={"metrics": metrics, "recommendations": recommendations, "status": status},
+            start_time=datetime.utcnow(),
+            end_time=datetime.utcnow(),
+        )
 
     def log_llm_call(
         self,
@@ -73,8 +63,18 @@ class LangSmithObserver:
         latency_ms: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
-        """Log LLM API call."""
+        """Log an individual LLM call as a LangSmith run."""
         if not self.enabled:
+            logger.debug(f"[local-only] LLM call: {model}")
             return
 
-        logger.debug(f"LLM call logged: {model}")
+        self._client.create_run(
+            name=f"llm_call:{model}",
+            run_type="llm",
+            project_name=self.project_name,
+            inputs={"prompt": prompt},
+            outputs={"response": response},
+            extra={"tokens_used": tokens_used, "latency_ms": latency_ms, **(metadata or {})},
+            start_time=datetime.utcnow(),
+            end_time=datetime.utcnow(),
+        )
