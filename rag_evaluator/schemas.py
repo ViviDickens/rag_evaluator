@@ -2,7 +2,8 @@
 Pydantic schemas para RAG evaluation requests y responses.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+from typing import Annotated
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -16,7 +17,7 @@ class RAGEvaluationStatus(str, Enum):
 
 class MetricScore(BaseModel):
     score: float = Field(..., ge=0.0, le=1.0)
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
 
 class RAGMetrics(BaseModel):
@@ -33,11 +34,14 @@ class OverallQuality(BaseModel):
     passed: bool
 
 
+NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 class RAGEvaluationRequest(BaseModel):
-    question: str
-    retrieved_context: List[str]
-    generated_answer: str
-    ground_truth_answer: Optional[str] = None
+    question: NonBlank
+    retrieved_context: List[NonBlank] = Field(..., min_length=1)
+    generated_answer: NonBlank
+    ground_truth_answer: NonBlank
     metadata: Optional[Dict[str, Any]] = None
 
 

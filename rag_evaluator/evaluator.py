@@ -9,6 +9,9 @@ the free-tier version instead (see ragas-lab for that variant).
 """
 
 import os
+import asyncio
+import math
+from copy import deepcopy
 import uuid
 import logging
 from datetime import datetime
@@ -81,8 +84,8 @@ class RAGEvaluator:
         """Evaluate a single RAG output."""
         evaluation_id = f"eval-{uuid.uuid4().hex[:8]}"
 
-        metrics = self._calculate_ragas_metrics(request)
-        self._cross_validate_with_deepeval(request, metrics)
+        metrics = await asyncio.to_thread(self._calculate_ragas_metrics, request)
+        await asyncio.to_thread(self._cross_validate_with_deepeval, request, metrics)
 
         overall_quality = self._assess_overall_quality(metrics)
         recommendations = self._generate_recommendations(metrics, request)
@@ -109,7 +112,7 @@ class RAGEvaluator:
 
     def _calculate_ragas_metrics(self, request: RAGEvaluationRequest) -> RAGMetrics:
         """Run the actual RAGAS metrics suite via ragas.evaluate()."""
-        ground_truth = request.ground_truth_answer or ""
+        ground_truth = request.ground_truth_answer
 
         dataset = Dataset.from_dict(
             {
@@ -122,19 +125,23 @@ class RAGEvaluator:
 
         result = ragas_evaluate(
             dataset,
-            metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+            metrics=[deepcopy(metric) for metric in (faithfulness, answer_relevancy, context_precision, context_recall)],
             llm=self.llm,
             embeddings=self.embeddings,
-            raise_exceptions=False,
+            raise_exceptions=True,
         )
 
         scores = result.to_pandas().iloc[0]
+        for name in self.thresholds:
+            score = float(scores[name])
+            if not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError(f"Invalid evaluation score for {name}")
 
         return RAGMetrics(
-            faithfulness=MetricScore(score=float(scores["faithfulness"]), confidence=0.9),
-            answer_relevancy=MetricScore(score=float(scores["answer_relevancy"]), confidence=0.9),
-            context_precision=MetricScore(score=float(scores["context_precision"]), confidence=0.9),
-            context_recall=MetricScore(score=float(scores["context_recall"]), confidence=0.9),
+            faithfulness=MetricScore(score=float(scores["faithfulness"]), confidence=None),
+            answer_relevancy=MetricScore(score=float(scores["answer_relevancy"]), confidence=None),
+            context_precision=MetricScore(score=float(scores["context_precision"]), confidence=None),
+            context_recall=MetricScore(score=float(scores["context_recall"]), confidence=None),
         )
 
     def _cross_validate_with_deepeval(self, request: RAGEvaluationRequest, metrics: RAGMetrics) -> None:
@@ -149,10 +156,10 @@ class RAGEvaluator:
             context=request.retrieved_context,
         )
 
-        hallucination = HallucinationMetric(threshold=0.5)
+        hallucination = HallucinationMetric(threshold=0.5, model="gpt-4o-mini", async_mode=False)
         hallucination.measure(test_case)
 
-        bias = BiasMetric(threshold=0.5)
+        bias = BiasMetric(threshold=0.5, model="gpt-4o-mini", async_mode=False)
         bias.measure(test_case)
 
         logger.info(

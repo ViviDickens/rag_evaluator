@@ -73,7 +73,7 @@ async def evaluate_rag(request: RAGEvaluationRequest):
         return result
     except Exception as e:
         logger.error(f"Evaluation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Evaluation failed; consult server logs.")
 
 
 if __name__ == "__main__":

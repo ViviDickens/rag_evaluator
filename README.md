@@ -1,5 +1,7 @@
 # RAG Evaluator
 
+[![CI](https://github.com/ViviDickens/rag_evaluator/actions/workflows/tests.yml/badge.svg)](https://github.com/ViviDickens/rag_evaluator/actions/workflows/tests.yml)
+
 An orchestrator that coordinates **RAGAS**, **DeepEval**, and **LangSmith** for Retrieval-Augmented Generation (RAG) quality assurance.
 
 RAGAS runs the core metrics (faithfulness, answer relevancy, context precision/recall) against an OpenAI evaluator model. DeepEval runs an independent cross-check for hallucination and bias on the same test case. LangSmith logs each evaluation as a run for observability — locally if no API key is set, or to your LangSmith project if one is.
@@ -54,15 +56,18 @@ Visit `http://localhost:8000/docs` for API documentation.
 from rag_evaluator.evaluator import RAGEvaluator
 from rag_evaluator.schemas import RAGEvaluationRequest
 
+import asyncio
+
 evaluator = RAGEvaluator()
 
 request = RAGEvaluationRequest(
     question="What is RAG?",
     retrieved_context=["RAG augments LLMs with retrieved context..."],
-    generated_answer="RAG is a technique that combines retrieval and generation...",
+    generated_answer="RAG augments language models with retrieved context.",
+    ground_truth_answer="RAG combines retrieval and generation.",
 )
 
-response = await evaluator.evaluate_single(request)
+response = asyncio.run(evaluator.evaluate_single(request))
 print(f"Score: {response.overall_quality.score}")
 print(f"Status: {response.overall_quality.status}")
 ```
@@ -96,27 +101,31 @@ rag_evaluator/
 
 | Metric | Measures | Threshold | Source |
 |--------|----------|-----------|--------|
-| **Faithfulness** | Answer adherence to context | >0.85 | RAGAS |
-| **Answer Relevancy** | Relevance to question | >0.80 | RAGAS |
-| **Context Precision** | Retrieved doc quality | >0.90 | RAGAS |
-| **Context Recall** | Coverage completeness | >0.75 | RAGAS |
+| **Faithfulness** | Answer adherence to context | ≥0.85 | RAGAS |
+| **Answer Relevancy** | Relevance to question | ≥0.80 | RAGAS |
+| **Context Precision** | Retrieved doc quality | ≥0.90 | RAGAS |
+| **Context Recall** | Coverage completeness | ≥0.75 | RAGAS |
 | **Hallucination** | Cross-check against context | 0.5 | DeepEval |
 | **Bias** | Cross-check on generated answer | 0.5 | DeepEval |
 
+## Quality decision and limitations
+
+The overall score is the arithmetic mean of the four RAGAS scores. PASS starts at 0.75, WARN at 0.65, and lower scores FAIL. Individual thresholds drive recommendations, not independent quality gates. Reference answers and non-empty contexts are required for this four-metric evaluation. Metric failures or non-finite scores are errors rather than successful evaluations. Confidence is null unless measured; DeepEval scores are logged separately and do not affect the overall verdict. The CI workflow checks dependencies and runs offline tests without external API keys; the live test is skipped in that environment.
+
 ## Why OpenAI as the evaluator model
 
-RAGAS needs an LLM to judge faithfulness/relevancy and an embeddings model for context precision/recall. This project uses OpenAI (`gpt-4o-mini` + `text-embedding-3-small`) because it has first-class, stable support in both RAGAS and LangChain with no version conflicts. A Gemini-based version was tried first and hit repeated dependency clashes between `langchain-google-genai` and RAGAS's pinned LangChain versions — a known pain point with that combination. A free-tier Groq variant (companion repo: `ragas-lab`) is also available for local experimentation without API cost.
+RAGAS uses an LLM for faithfulness and reference-based context metrics, and an embeddings model for answer relevancy. This project uses OpenAI (`gpt-4o-mini` + `text-embedding-3-small`) because it has first-class, stable support in both RAGAS and LangChain using a constrained dependency range. A Gemini-based version was tried first and hit repeated dependency clashes between `langchain-google-genai` and RAGAS's pinned LangChain versions — a known pain point with that combination. A [Groq variant](https://github.com/ViviDickens/ragas-lab) is available for experimentation, subject to provider pricing and limits.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11 recommended (CI target); package metadata requires Python 3.10+
 - pip/venv
 - OpenAI API key (for RAGAS evaluator model)
 - LangSmith API key (optional, for remote tracing)
 
 ## License
 
-MIT
+No license file is currently included.
 
 ---
 
